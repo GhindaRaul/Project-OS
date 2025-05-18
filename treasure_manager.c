@@ -5,27 +5,30 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <time.h>  // Include the time.h header for ctime
+#include <time.h>
+#include <errno.h>
+#include <limits.h>  // Included for PATH_MAX
 
 #define clue_length 50
-#define id_length 4
+#define id_length 10
 #define name_length 50
 #define Treasure_file "treasure.dat"
 #define LOG_FILE "logged_hunt"
+#define PATH_MAX 4096
 
 typedef struct treasure_manager {
-    char treasureID[id_length];       
-    char User_name[name_length];       
-    float longitude;         
-    float latitude;          
-    char Clue_text[clue_length];    
-    int value;                
+    char treasureID[id_length];
+    char User_name[name_length];
+    float longitude;
+    float latitude;
+    char Clue_text[clue_length];
+    int value;
 } Treasure;
 
 void replace_spaces_with_underscores(char *str) {
     for (int i = 0; str[i] != '\0'; i++) {
         if (str[i] == ' ') {
-            str[i] = '_';  // Replace space with underscore
+            str[i] = '_';
         }
     }
 }
@@ -33,179 +36,141 @@ void replace_spaces_with_underscores(char *str) {
 void check_for_directory(const char *hunt_ID) {
     struct stat st;
 
-    // Check if the directory exists
-    if (stat(hunt_ID, &st) == -1) {
-        if (mkdir(hunt_ID, 0755) == -1) {
-            perror("mkdir failed");
+    if (stat("hunts", &st) == -1) {
+        if (mkdir("hunts", 0755) == -1) {
+            perror("mkdir hunts failed");
             exit(1);
-        } else {
-            printf("Created hunt directory: %s\n", hunt_ID);
+        }
+    }
+
+    char full_path[PATH_MAX];
+    snprintf(full_path, sizeof(full_path), "hunts/%s", hunt_ID);
+
+    if (stat(full_path, &st) == -1) {
+        if (mkdir(full_path, 0755) == -1) {
+            perror("mkdir hunt failed");
+            exit(1);
         }
     } else if (!S_ISDIR(st.st_mode)) {
-        fprintf(stderr, "Error: %s exists but is not a directory.\n", hunt_ID);
+        fprintf(stderr, "Error: %s exists but is not a directory.\n", full_path);
         exit(1);
     }
 }
 
-int treasure_exists(const char *hunt_ID, const char *treasureID) {
-    char file_path[256];
-    snprintf(file_path, sizeof(file_path), "%s/%s", hunt_ID, Treasure_file);
+int parse_treasure_line(const char *line, Treasure *t) {
+    char tmp_line[256];
+    strncpy(tmp_line, line, sizeof(tmp_line));
+    tmp_line[sizeof(tmp_line) - 1] = 0;
 
-    // Open the treasure file in read-only mode
-    int fd = open(file_path, O_RDONLY);
-    if (fd == -1) {
-        perror("Failed to open treasure file");
-        return 0;  // If file doesn't exist, return 0 (not found)
+    char *tokens[6];
+    int count = 0;
+    char *token = strtok(tmp_line, " \t\n");
+    while (token && count < 6) {
+        tokens[count++] = token;
+        token = strtok(NULL, " \t\n");
     }
+    if (count != 6) return 0;
 
-    char buffer[1024];
-    ssize_t read_bytes;
-    int found = 0;
+    strncpy(t->treasureID, tokens[0], id_length - 1);
+    t->treasureID[id_length - 1] = 0;
 
-    // Read the file and search for the treasureID
-    while ((read_bytes = read(fd, buffer, sizeof(buffer))) > 0) {
-        char *line = buffer;
-        while (line < buffer + read_bytes) {
-            char treasureID_local[id_length];
-            char user_name[name_length];
-            float longitude;
-            float latitude;
-            char clue_text[clue_length];
-            int value;
+    strncpy(t->User_name, tokens[1], name_length - 1);
+    t->User_name[name_length - 1] = 0;
 
-            // Extract all the treasure info (ID, user, longitude, latitude, clue, value) from the line
-            int n = sscanf(line, "%s %s %f %f %s %d", treasureID_local, user_name, &longitude, &latitude, clue_text, &value);
-            if (n == 6 && strcmp(treasureID_local, treasureID) == 0) {
-                found = 1;
-                break;
+    t->longitude = atof(tokens[2]);
+    t->latitude = atof(tokens[3]);
+
+    strncpy(t->Clue_text, tokens[4], clue_length - 1);
+    t->Clue_text[clue_length - 1] = 0;
+
+    t->value = atoi(tokens[5]);
+
+    return 1;
+}
+
+int treasure_exists(const char *hunt_ID, const char *treasureID) {
+    char file_path[PATH_MAX];
+    snprintf(file_path, sizeof(file_path), "hunts/%s/%s", hunt_ID, Treasure_file);
+
+    int fd = open(file_path, O_RDONLY);
+    if (fd == -1) return 0;
+
+    char buf[1024], linebuf[256];
+    ssize_t nread;
+    int linepos = 0, found = 0;
+
+    while ((nread = read(fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < nread; i++) {
+            if (buf[i] == '\n') {
+                linebuf[linepos] = 0;
+                Treasure t;
+                if (parse_treasure_line(linebuf, &t) && strcmp(t.treasureID, treasureID) == 0) {
+                    found = 1;
+                    break;
+                }
+                linepos = 0;
+            } else if (linepos < sizeof(linebuf) - 1) {
+                linebuf[linepos++] = buf[i];
             }
-
-            // Move to the next treasure in the file (skip over the current line)
-            while (line < buffer + read_bytes && *line != '\n') {
-                line++;
-            }
-            line++; // Move past the newline character
         }
         if (found) break;
     }
 
     close(fd);
-    return found;  // Return 1 if the treasureID was found, otherwise 0
+    return found;
 }
 
 void add_treasure(const char *hunt_ID, Treasure *treasure) {
-    // Replace spaces with underscores in user_name and clue_text
     replace_spaces_with_underscores(treasure->User_name);
     replace_spaces_with_underscores(treasure->Clue_text);
 
-    // Check if the treasure already exists in the file
     if (treasure_exists(hunt_ID, treasure->treasureID)) {
-        fprintf(stderr, "Treasure with ID %s already exists!\n", treasure->treasureID);
+        write(STDERR_FILENO, "Treasure with this ID already exists!\n", 38);
         return;
     }
 
-    char file_path[256];
-    snprintf(file_path, sizeof(file_path), "%s/%s", hunt_ID, Treasure_file);
+    char file_path[PATH_MAX];
+    snprintf(file_path, sizeof(file_path), "hunts/%s/%s", hunt_ID, Treasure_file);
 
-    // Open the treasure file in read-write, create if doesn't exist, and append
     int fd = open(file_path, O_RDWR | O_CREAT | O_APPEND, 0644);
     if (fd == -1) {
         perror("Failed to open treasure file");
         exit(1);
     }
 
-    // Write treasureID followed by a space
-    char treasure_data[512];  // Buffer to hold formatted data
-    snprintf(treasure_data, sizeof(treasure_data), "%s ", treasure->treasureID);
-    ssize_t written = write(fd, treasure_data, strlen(treasure_data));
-    if (written != strlen(treasure_data)) {
-        perror("Failed to write treasureID");
-        close(fd);
-        exit(1);
-    }
+    char line[256];
+    int len = snprintf(line, sizeof(line), "%s %s %f %f %s %d\n",
+                       treasure->treasureID,
+                       treasure->User_name,
+                       treasure->longitude,
+                       treasure->latitude,
+                       treasure->Clue_text,
+                       treasure->value);
 
-    // Write user_name followed by a space
-    snprintf(treasure_data, sizeof(treasure_data), "%s ", treasure->User_name);
-    written = write(fd, treasure_data, strlen(treasure_data));
-    if (written != strlen(treasure_data)) {
-        perror("Failed to write user_name");
-        close(fd);
-        exit(1);
+    if (write(fd, line, len) != len) {
+        perror("Failed to write treasure line");
     }
-
-    // Write longitude as string followed by a space
-    snprintf(treasure_data, sizeof(treasure_data), "%f ", treasure->longitude);
-    written = write(fd, treasure_data, strlen(treasure_data));
-    if (written != strlen(treasure_data)) {
-        perror("Failed to write longitude");
-        close(fd);
-        exit(1);
-    }
-
-    // Write latitude as string followed by a space
-    snprintf(treasure_data, sizeof(treasure_data), "%f ", treasure->latitude);
-    written = write(fd, treasure_data, strlen(treasure_data));
-    if (written != strlen(treasure_data)) {
-        perror("Failed to write latitude");
-        close(fd);
-        exit(1);
-    }
-
-    // Write clue_text followed by a space
-    snprintf(treasure_data, sizeof(treasure_data), "%s ", treasure->Clue_text);
-    written = write(fd, treasure_data, strlen(treasure_data));
-    if (written != strlen(treasure_data)) {
-        perror("Failed to write clue_text");
-        close(fd);
-        exit(1);
-    }
-
-    // Write value followed by a space
-    snprintf(treasure_data, sizeof(treasure_data), "%d\n", treasure->value);
-    written = write(fd, treasure_data, strlen(treasure_data));
-    if (written != strlen(treasure_data)) {
-        perror("Failed to write value");
-        close(fd);
-        exit(1);
-    }
-
-    // Close file after writing all elements
     close(fd);
 
-    // Logging the action
-    char log_path[256];
-    snprintf(log_path, sizeof(log_path), "%s/%s", hunt_ID, LOG_FILE);
-
+    char log_path[PATH_MAX];
+    snprintf(log_path, sizeof(log_path), "hunts/%s/%s", hunt_ID, LOG_FILE);
     fd = open(log_path, O_RDWR | O_CREAT | O_APPEND, 0644);
     if (fd == -1) {
         perror("Failed to open log file");
         exit(1);
     }
 
-    // Create a log entry
-    char log_entry[256];
-    snprintf(log_entry, sizeof(log_entry), "Added treasure with ID %s by user %s\n", treasure->treasureID, treasure->User_name);
-    ssize_t log_written = write(fd, log_entry, strlen(log_entry));
-    if (log_written != strlen(log_entry)) {
+    len = snprintf(line, sizeof(line), "Added treasure with ID %s by user %s\n",
+                   treasure->treasureID, treasure->User_name);
+    if (write(fd, line, len) != len) {
         perror("Failed to write to log file");
-        close(fd);
-        exit(1);
     }
-
-    // Add newline character after log entry
-    written = write(fd, "\n", 1);
-    if (written != 1) {
-        perror("Failed to write newline character in log");
-        close(fd);
-        exit(1);
-    }
-
     close(fd);
 }
 
 void list_treasures(const char *hunt_ID) {
-    char file_path[256];
-    snprintf(file_path, sizeof(file_path), "%s/%s", hunt_ID, Treasure_file);
+    char file_path[PATH_MAX];
+    snprintf(file_path, sizeof(file_path), "hunts/%s/%s", hunt_ID, Treasure_file);
 
     struct stat file_stat;
     if (stat(file_path, &file_stat) == -1) {
@@ -213,12 +178,9 @@ void list_treasures(const char *hunt_ID) {
         exit(1);
     }
 
-    // Print Hunt name, file size, and last modification time
-    printf("Hunt: %s\n", hunt_ID);
-    printf("Total File Size: %ld bytes\n", file_stat.st_size);
-    printf("Last Modification Time: %s", ctime(&file_stat.st_mtime)); // Now works fine with %s
+    dprintf(STDOUT_FILENO, "Hunt: %s\nTotal File Size: %ld bytes\nLast Modification Time: %s",
+            hunt_ID, file_stat.st_size, ctime(&file_stat.st_mtime));
 
-    // Open the treasure file in read-only mode
     int fd = open(file_path, O_RDONLY);
     if (fd == -1) {
         perror("Failed to open treasure file");
@@ -227,126 +189,221 @@ void list_treasures(const char *hunt_ID) {
 
     char buffer[1024];
     ssize_t read_bytes;
-    printf("\nTreasures in hunt %s:\n", hunt_ID);
     while ((read_bytes = read(fd, buffer, sizeof(buffer))) > 0) {
-        write(STDOUT_FILENO, buffer, read_bytes);  // Print the contents of the file
-    }
-
-    if (read_bytes == -1) {
-        perror("Error reading from file");
+        if (write(STDOUT_FILENO, buffer, read_bytes) != read_bytes) {
+            perror("Failed to write to stdout");
+        }
     }
 
     close(fd);
 }
 
 void view_treasure(const char *hunt_ID, const char *treasureID) {
-    char file_path[256];
-    snprintf(file_path, sizeof(file_path), "%s/%s", hunt_ID, Treasure_file);
+    char file_path[PATH_MAX];
+    snprintf(file_path, sizeof(file_path), "hunts/%s/%s", hunt_ID, Treasure_file);
 
-    // Open the treasure file in read-only mode
     int fd = open(file_path, O_RDONLY);
     if (fd == -1) {
         perror("Failed to open treasure file");
         exit(1);
     }
 
-    char buffer[1024];
-    ssize_t read_bytes;
-    int found = 0;
+    char buf[1024], linebuf[256];
+    ssize_t nread;
+    int linepos = 0, found = 0;
 
-    // Search for the specific treasureID
-    while ((read_bytes = read(fd, buffer, sizeof(buffer))) > 0) {
-        char *line = buffer;
-        while (line < buffer + read_bytes) {
-            char treasureID_local[id_length];
-            char user_name[name_length];
-            float longitude;
-            float latitude;
-            char clue_text[clue_length];
-            int value;
-
-            int n = sscanf(line, "%s %s %f %f %s %d", treasureID_local, user_name, &longitude, &latitude, clue_text, &value);
-            if (n == 6 && strcmp(treasureID_local, treasureID) == 0) {
-                // Print the treasure details
-                printf("Treasure Details:\n");
-                printf("Treasure ID: %s\n", treasureID_local);
-                printf("User: %s\n", user_name);
-                printf("Longitude: %.4f\n", longitude);
-                printf("Latitude: %.4f\n", latitude);
-                printf("Clue: %s\n", clue_text);
-                printf("Value: %d\n", value);
-                found = 1;
-                break;
+    while ((nread = read(fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < nread; i++) {
+            if (buf[i] == '\n') {
+                linebuf[linepos] = 0;
+                Treasure t;
+                if (parse_treasure_line(linebuf, &t) && strcmp(t.treasureID, treasureID) == 0) {
+                    dprintf(STDOUT_FILENO, "Treasure Details:\n");
+                    dprintf(STDOUT_FILENO, "Treasure ID: %s\n", t.treasureID);
+                    dprintf(STDOUT_FILENO, "User: %s\n", t.User_name);
+                    dprintf(STDOUT_FILENO, "Longitude: %.4f\n", t.longitude);
+                    dprintf(STDOUT_FILENO, "Latitude: %.4f\n", t.latitude);
+                    dprintf(STDOUT_FILENO, "Clue: %s\n", t.Clue_text);
+                    dprintf(STDOUT_FILENO, "Value: %d\n", t.value);
+                    found = 1;
+                    break;
+                }
+                linepos = 0;
+            } else if (linepos < sizeof(linebuf) - 1) {
+                linebuf[linepos++] = buf[i];
             }
-
-            while (line < buffer + read_bytes && *line != '\n') {
-                line++;
-            }
-            line++; // Skip newline character
         }
-
         if (found) break;
     }
 
     if (!found) {
-        printf("Treasure with ID %s not found.\n", treasureID);
+        dprintf(STDOUT_FILENO, "Treasure with ID %s not found.\n", treasureID);
     }
 
     close(fd);
 }
 
+void remove_treasure(const char *hunt_id, const char *treasure_id) {
+    char file_path[PATH_MAX];
+    snprintf(file_path, sizeof(file_path), "hunts/%s/%s", hunt_id, Treasure_file);
+
+    int fd = open(file_path, O_RDONLY);
+    if (fd < 0) {
+        perror("open");
+        return;
+    }
+
+    Treasure *all_treasures = NULL;
+    int total = 0;
+    Treasure t;
+
+    char buf[1024], line[256];
+    ssize_t nread;
+    int linepos = 0;
+
+    while ((nread = read(fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < nread; i++) {
+            if (buf[i] == '\n') {
+                line[linepos] = '\0';
+                if (parse_treasure_line(line, &t)) {
+                    Treasure *new_block = realloc(all_treasures, (total + 1) * sizeof(Treasure));
+                    if (!new_block) {
+                        perror("realloc");
+                        free(all_treasures);
+                        close(fd);
+                        return;
+                    }
+                    all_treasures = new_block;
+                    all_treasures[total++] = t;
+                }
+                linepos = 0;
+            } else if (linepos < sizeof(line) - 1) {
+                line[linepos++] = buf[i];
+            }
+        }
+    }
+    close(fd);
+
+    Treasure *filtered = malloc(total * sizeof(Treasure));
+    if (!filtered) {
+        perror("malloc");
+        free(all_treasures);
+        return;
+    }
+
+    int found = 0, new_count = 0;
+    for (int i = 0; i < total; ++i) {
+        if (strcmp(all_treasures[i].treasureID, treasure_id) == 0) {
+            found = 1;
+        } else {
+            filtered[new_count++] = all_treasures[i];
+        }
+    }
+
+    free(all_treasures);
+
+    if (!found) {
+        printf("Treasure ID %s not found.\n", treasure_id);
+        free(filtered);
+        return;
+    }
+
+    fd = open(file_path, O_WRONLY | O_TRUNC);
+    if (fd < 0) {
+        perror("open write");
+        free(filtered);
+        return;
+    }
+
+    for (int i = 0; i < new_count; ++i) {
+        char line[256];
+        int len = snprintf(line, sizeof(line), "%s %s %.6f %.6f %s %d\n",
+                           filtered[i].treasureID,
+                           filtered[i].User_name,
+                           filtered[i].longitude,
+                           filtered[i].latitude,
+                           filtered[i].Clue_text,
+                           filtered[i].value);
+        if (write(fd, line, len) != len) {
+            perror("write");
+        }
+    }
+
+    close(fd);
+    free(filtered);
+
+    printf("Treasure removed.\n");
+}
+
+void remove_hunt(const char *hunt_id) {
+    char file_path[PATH_MAX], log_path[PATH_MAX], dir_path[PATH_MAX];
+
+    snprintf(file_path, sizeof(file_path), "hunts/%s/%s", hunt_id, Treasure_file);
+    snprintf(log_path, sizeof(log_path), "hunts/%s/%s", hunt_id, LOG_FILE);
+    snprintf(dir_path, sizeof(dir_path), "hunts/%s", hunt_id);
+
+    unlink(file_path);
+    unlink(log_path);
+    rmdir(dir_path);
+
+    printf("Hunt removed.\n");
+}
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s --add|--list|--view <arguments>\n", argv[0]);
+        dprintf(STDERR_FILENO, "Usage: %s --add|--list|--view <arguments>\n", argv[0]);
         return 1;
     }
 
     if (strcmp(argv[1], "--add") == 0) {
         if (argc != 9) {
-            fprintf(stderr, "Usage for --add: %s --add <hunt_ID> <treasure_ID> <user_name> <longitude> <latitude> <clue> <value>\n", argv[0]);
+            dprintf(STDERR_FILENO, "Usage for --add: %s --add <hunt_ID> <treasure_ID> <user_name> <longitude> <latitude> <clue> <value>\n", argv[0]);
             return 1;
         }
 
         Treasure treasure;
-        char *ends;
-
         snprintf(treasure.treasureID, sizeof(treasure.treasureID), "%s", argv[3]);
         snprintf(treasure.User_name, sizeof(treasure.User_name), "%s", argv[4]);
-        sscanf(argv[5], "%f", &treasure.longitude);
-        sscanf(argv[6], "%f", &treasure.latitude);
+        treasure.longitude = atof(argv[5]);
+        treasure.latitude = atof(argv[6]);
         snprintf(treasure.Clue_text, sizeof(treasure.Clue_text), "%s", argv[7]);
-        sscanf(argv[8], "%d", &treasure.value);
+        treasure.value = atoi(argv[8]);
 
-        // Check if the directory exists, if not, create it
         check_for_directory(argv[2]);
-
-        // Add the treasure to the specified hunt
         add_treasure(argv[2], &treasure);
     }
     else if (strcmp(argv[1], "--list") == 0) {
         if (argc != 3) {
-            fprintf(stderr, "Usage for --list: %s --list <hunt_ID>\n", argv[0]);
+            dprintf(STDERR_FILENO, "Usage for --list: %s --list <hunt_ID>\n", argv[0]);
             return 1;
         }
-
-        // List treasures in the specified hunt directory
         list_treasures(argv[2]);
     }
     else if (strcmp(argv[1], "--view") == 0) {
         if (argc != 4) {
-            fprintf(stderr, "Usage for --view: %s --view <hunt_ID> <treasure_ID>\n", argv[0]);
+            dprintf(STDERR_FILENO, "Usage for --view: %s --view <hunt_ID> <treasure_ID>\n", argv[0]);
             return 1;
         }
-
-        // View details of a specific treasure
         view_treasure(argv[2], argv[3]);
     }
+    else if (strcmp(argv[1], "--remove") == 0) {
+        if (argc != 4) {
+            dprintf(STDERR_FILENO, "Usage for --remove: %s --remove <hunt_ID> <treasure_ID>\n", argv[0]);
+            return 1;
+        }
+        remove_treasure(argv[2], argv[3]);
+    }
+    else if (strcmp(argv[1], "--delete-hunt") == 0) {
+        if (argc != 3) {
+            dprintf(STDERR_FILENO, "Usage for --delete-hunt: %s --delete-hunt <hunt_ID>\n", argv[0]);
+            return 1;
+        }
+        remove_hunt(argv[2]);
+    }
     else {
-        fprintf(stderr, "Unknown option: %s\n", argv[1]);
+        dprintf(STDERR_FILENO, "Unknown option: %s\n", argv[1]);
         return 1;
     }
 
     return 0;
 }
-
